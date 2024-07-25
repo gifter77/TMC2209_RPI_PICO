@@ -25,7 +25,7 @@ class TMC_UART:
 #-----------------------------------------------------------------------
 # constructor
 #-----------------------------------------------------------------------
-    def __init__(self, serialport, baudrate, rxpin, txpin, mtr_id_arg):
+    def __init__(self, serialport, baudrate,rxpin,txpin,mtr_id_arg):
         self.ser = UART(serialport, baudrate=115200, bits=8, parity=None, stop=1, tx=txpin, rx=rxpin) 
         self.mtr_id=mtr_id_arg
         #self.ser.timeout = 20000/baudrate            # adjust per baud and hardware. Sequential reads without some delay fail.

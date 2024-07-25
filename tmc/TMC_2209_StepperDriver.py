@@ -74,9 +74,9 @@ class TMC_2209:
 #-----------------------------------------------------------------------
 # constructor
 #-----------------------------------------------------------------------
-    def __init__(self, pin_step, pin_dir, pin_en, baudrate=115200, serialport=2):
+    def __init__(self, pin_step, pin_dir, pin_en, rx_pin, tx_pin, mtr_id=0, baudrate=115200, serialport=1):
         
-        self.tmc_uart = TMC_UART(serialport, baudrate)
+        self.tmc_uart = TMC_UART(serialport, baudrate,rx_pin,tx_pin,mtr_id)
         self._pin_step = pin_step
         self._pin_dir = pin_dir
         self._pin_en = pin_en

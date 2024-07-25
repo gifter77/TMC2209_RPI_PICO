@@ -1,6 +1,7 @@
 import sys
 from tmc.TMC_2209_StepperDriver import *
 import time
+from machine import Pin
 
 
 print("---")
@@ -13,9 +14,9 @@ print("---")
 
 #-----------------------------------------------------------------------
 # initiate the TMC_2209 class
-# use your pins for pin_step, pin_dir, pin_en here
+# use your pins for pin_step, pin_dir, pin_en, pin_rx, pin_tx, mtr_id (defined by MS1 and MS2 pins) here
 #-----------------------------------------------------------------------
-tmc = TMC_2209(27, 14, 26)
+tmc = TMC_2209(27, 14, 26, Pin(9), Pin(8),mtr_id=3)
 
 
 
