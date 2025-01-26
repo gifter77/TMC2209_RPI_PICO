@@ -4,6 +4,27 @@ from machine import Pin as GPIO
 import machine
 import time
 import math
+from rp2 import PIO, StateMachine, asm_pio
+
+# Adapted from: https://blog.leonti.dev/controlling-stepper-with-pio-on-raspberry-pi-pico/
+@asm_pio(set_init=PIO.OUT_LOW)
+def stepper():
+  pull(noblock) # pull the latest data into osr or put current x into osr if queue is empty
+  mov(x, osr) # copy osr into x
+  mov(y, x) # copy x into y to reset later
+
+  jmp(not_x, "end") # if x is empty skip the step
+
+  set(pins, 1)
+  set(pins, 0) # end the pulse
+  #irq(block, rel(0)) # invoke interrupt
+  irq(rel(0))  # invoke interrupt
+
+  label("delay")
+  jmp(x_dec, "delay") # loop and decrement x until it's 0
+  
+  label("end")
+  mov(x, y) # restore x, which is 0 at this point
 
 class Direction():
     CCW = 0
@@ -40,7 +61,7 @@ class TMC_2209:
     
     _direction = True
 
-    _stop = False
+    _stop = True
 
     _msres = -1
     _stepsPerRevolution = 0
@@ -70,13 +91,16 @@ class TMC_2209:
         for v in x:
            a=a+v
         return(a/len(x))
+    
+    def step_callback():
+        print("Moved")
 
 #-----------------------------------------------------------------------
 # constructor
 #-----------------------------------------------------------------------
-    def __init__(self, pin_step, pin_dir, pin_en, rx_pin, tx_pin, mtr_id=0, baudrate=115200, serialport=1):
+    def __init__(self, pin_step, pin_dir, pin_en, tx_pin, mtr_id=0, baudrate=115200, serialport=1):
         
-        self.tmc_uart = TMC_UART(serialport, baudrate,rx_pin,tx_pin,mtr_id)
+        self.tmc_uart = TMC_UART(serialport, baudrate, tx_pin,mtr_id)
         self._pin_step = pin_step
         self._pin_dir = pin_dir
         self._pin_en = pin_en
@@ -87,12 +111,16 @@ class TMC_2209:
         self.p_pin_en = GPIO(self._pin_en, GPIO.OUT)
         self.p_pin_dir(self._direction)
         if(self._loglevel >= Loglevel.info):
-            print("TMC2209: GPIO Init finished")      
+            print("TMC2209: GPIO Init finished")
+        self.disablePDN()
         self.readStepsPerRevolution()
         self.clearGSTAT()
-        self.tmc_uart.flushSerialBuffer()
         if(self._loglevel >= Loglevel.info):
             print("TMC2209: Init finished")
+        self.stepper_sm = StateMachine(2, stepper, freq=1_000_000, set_base=self.p_pin_step)
+        self.stepper_sm.irq(self.step_callback)
+        self.stepper_sm.put(0)
+        self.stepper_sm.active(1)
 
 
 #-----------------------------------------------------------------------
@@ -102,7 +130,7 @@ class TMC_2209:
         if(self._loglevel >= Loglevel.info):
             print("TMC2209: Deinit")
         self.setMotorEnabled(False)
-        GPIO.cleanup() 
+        del self.tmc_uart
 
 #-----------------------------------------------------------------------
 # set the loglevel. See the Enum Loglevel
@@ -120,6 +148,11 @@ class TMC_2209:
 #-----------------------------------------------------------------------
 # read the register Adress "DRVSTATUS" and prints all current setting
 #-----------------------------------------------------------------------
+    def disablePDN(self):        
+        gconf = self.tmc_uart.read_int(reg.GCONF)
+        gconf = self.tmc_uart.set_bit(gconf, reg.pdn_disable)
+        self.tmc_uart.write_reg_check(reg.GCONF, gconf)
+
     def readDRVSTATUS(self):
         print("TMC2209: ---")
         print("TMC2209: DRIVER STATUS:")
@@ -517,7 +550,7 @@ class TMC_2209:
 #-----------------------------------------------------------------------
     def setCurrent(self, run_current, hold_current_multiplier = 0.5, hold_current_delay = 10, Vref = 1.2):
         CS_IRun = 0
-        Rsense = 0.11
+        Rsense = 0.110
         Vfs = 0
 
         if(self.getVSense()):
@@ -610,6 +643,7 @@ class TMC_2209:
 #-----------------------------------------------------------------------
     def setMicrosteppingResolution(self, msres):      
         chopconf = self.tmc_uart.read_int(reg.CHOPCONF)
+        #chopconf = 0x10000053
         chopconf = chopconf & (~reg.msres0 | ~reg.msres1 | ~reg.msres2 | ~reg.msres3) #setting all bits to zero
         msresdezimal = int(math.log(msres, 2))
         msresdezimal = 8 - msresdezimal
@@ -619,6 +653,7 @@ class TMC_2209:
         if(self._loglevel >= Loglevel.info):
             print("TMC2209: writing "+str(msres)+" microstep setting")
         self.tmc_uart.write_reg_check(reg.CHOPCONF, chopconf)
+        #self.tmc_uart.write_reg(reg.CHOPCONF, chopconf)
         self.setMStepResolutionRegSelect(True)
         self.readStepsPerRevolution()
         return True
@@ -630,6 +665,7 @@ class TMC_2209:
 #-----------------------------------------------------------------------
     def setMStepResolutionRegSelect(self, en):                  
         gconf = self.tmc_uart.read_int(reg.GCONF)
+        #gconf = 0b111000001
         
         if(en == True):
             gconf = self.tmc_uart.set_bit(gconf, reg.mstep_reg_select)
@@ -639,7 +675,7 @@ class TMC_2209:
         if(self._loglevel >= Loglevel.info):
             print("TMC2209: writing MStep Reg Select: "+str(en))
         self.tmc_uart.write_reg_check(reg.GCONF, gconf)
-
+        #self.tmc_uart.write_reg(reg.GCONF, gconf)
 #-----------------------------------------------------------------------
 # returns how many steps are needed for one revolution
 #-----------------------------------------------------------------------
@@ -792,6 +828,12 @@ class TMC_2209:
 #-----------------------------------------------------------------------
     def stop(self):
         self._stop = True
+        
+#-----------------------------------------------------------------------
+# check if running
+#-----------------------------------------------------------------------
+    def is_running(self):
+        return not self._stop
 
 #-----------------------------------------------------------------------
 # runs the motor to the given position.
@@ -800,7 +842,7 @@ class TMC_2209:
 # returns true when the movement if finshed normally and false,
 # when the movement was stopped
 #-----------------------------------------------------------------------
-    def runToPositionSteps(self, steps, movement_abs_rel = None):
+    def runToPositionSteps(self, steps, movement_abs_rel = None, callback = None):
         if(movement_abs_rel is not None):
             this_movement_abs_rel = movement_abs_rel
         else:
@@ -818,7 +860,12 @@ class TMC_2209:
         self.computeNewSpeed()
         #print("speed:", self.computeNewSpeed())
         while (self.run() and not self._stop): #returns false, when target position is reached
-            pass
+            time.sleep(0.0000001)
+            if callback != None:# and it == 10:
+                callback()
+            #pass
+        if self._stop:
+            self.stepper_sm.put(0)
         return not self._stop
 
 #-----------------------------------------------------------------------
@@ -834,12 +881,21 @@ class TMC_2209:
 # returns true if the target position is reached
 # should not be called from outside!
 #-----------------------------------------------------------------------
+#    def run(self):
+#        if (self.runSpeed()): #returns true, when a step is made
+#            self.computeNewSpeed()
+#            #print(self.getStallguard_Result())
+#            #print(self.getTStep())
+#        return (self._speed != 0.0 and self.distanceToGo() != 0)
+
     def run(self):
-        if (self.runSpeed()): #returns true, when a step is made
-            self.computeNewSpeed()
-            #print(self.getStallguard_Result())
-            #print(self.getTStep())
-        return (self._speed != 0.0 and self.distanceToGo() != 0)
+        self.computeNewSpeed()
+        done = (self._speed == 0.0 or self.distanceToGo() == 0)
+        if done:
+            self.stepper_sm.put(0)
+        else:
+            self.stepper_sm.put(int(math.ceil(self._stepInterval-9)))
+        return (not done)
 
 #-----------------------------------------------------------------------
 # returns the remaining distance the motor should run
@@ -942,6 +998,13 @@ class TMC_2209:
                 return True
         else:
             return False
+        
+    def step_callback(self, sm):
+        #print("Moved 1 step")
+        if (self._direction == 1): # Clockwise
+            self._currentPos += 1
+        else: # Anticlockwise 
+            self._currentPos -= 1
 
 #-----------------------------------------------------------------------
 # method that makes on step
